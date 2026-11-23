@@ -242,6 +242,8 @@ fun PartInspectionScreen(
         "0%"
     } else if (cuZnTotal <= 0.0001) {
         "0%"
+    } else if (kotlin.math.round(cuZnTotal * 1000).toLong() % 10L != 0L) {
+        String.format(Locale.US, "%.3f%%", cuZnTotal)
     } else {
         String.format(Locale.US, "%.2f%%", cuZnTotal)
     }
@@ -1002,7 +1004,7 @@ fun PartInspectionScreen(
 }
 
 private fun formatElementValue(value: Double): String {
-    return if (value == 0.0) "0" else String.format(Locale.US, "%.2f", value).trimEnd('0').trimEnd('.')
+    return if (value == 0.0) "0" else String.format(Locale.US, "%.3f", value).trimEnd('0').trimEnd('.')
 }
 
 private fun createTempPhotoUri(context: Context): Uri {

@@ -383,7 +383,11 @@ data class ComponentInspection(
         val cu = elements["Cu"] ?: 0.0
         val zn = elements["Zn"] ?: 0.0
         val total = cu + zn
-        return if (total <= 0.0001) "0%" else String.format(Locale.US, "%.2f%%", total)
+        return when {
+            total <= 0.0001 -> "0%"
+            kotlin.math.round(total * 1000).toLong() % 10L != 0L -> String.format(Locale.US, "%.3f%%", total)
+            else -> String.format(Locale.US, "%.2f%%", total)
+        }
     }
 }
 

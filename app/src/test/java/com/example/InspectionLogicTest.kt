@@ -73,6 +73,61 @@ class InspectionLogicTest {
     }
 
     @Test
+    fun olympusVantaRealPhotoLayoutParses6061GradeLightElementAndTiltedRows() {
+        // Mirrors real Olympus Vanta screen capture (Photo 1 & 2) with 4 columns, [Ni] box, OCR typos, and ND rows
+        val lines = listOf(
+            OcrSpatialLine("6061 5052-plus", left = 40, top = 40, right = 260, bottom = 68),
+            OcrSpatialLine("6061", left = 180, top = 85, right = 290, bottom = 135),
+            OcrSpatialLine("El", left = 40, top = 160, right = 80, bottom = 188),
+            OcrSpatialLine("%", left = 150, top = 162, right = 185, bottom = 190),
+            OcrSpatialLine("+/- 3σ", left = 270, top = 165, right = 350, bottom = 193),
+            OcrSpatialLine("6061", left = 390, top = 167, right = 460, bottom = 195),
+
+            // Tilted rows (value centerY shifts +10..15px downward to the right)
+            OcrSpatialLine("LE", left = 42, top = 210, right = 85, bottom = 240),
+            OcrSpatialLine("99.43", left = 148, top = 218, right = 225, bottom = 248),
+            OcrSpatialLine("0.16", left = 275, top = 224, right = 335, bottom = 254),
+
+            OcrSpatialLine("Fe", left = 42, top = 265, right = 82, bottom = 295),
+            OcrSpatialLine("O.198", left = 148, top = 275, right = 225, bottom = 305),
+            OcrSpatialLine("0.083", left = 275, top = 281, right = 345, bottom = 311),
+
+            OcrSpatialLine("Cu", left = 42, top = 320, right = 85, bottom = 350),
+            OcrSpatialLine("0,147", left = 148, top = 330, right = 225, bottom = 360),
+            OcrSpatialLine("0.043", left = 275, top = 336, right = 345, bottom = 366),
+
+            OcrSpatialLine("Cr", left = 42, top = 375, right = 82, bottom = 405),
+            OcrSpatialLine("0.11", left = 148, top = 385, right = 215, bottom = 415),
+            OcrSpatialLine("0.11", left = 275, top = 391, right = 335, bottom = 421),
+
+            // Red highlight box around Ni often OCRs as [Ni] or Nl
+            OcrSpatialLine("[Ni]", left = 40, top = 430, right = 92, bottom = 460),
+            OcrSpatialLine("0.110", left = 148, top = 440, right = 225, bottom = 470),
+            OcrSpatialLine("0.044", left = 275, top = 446, right = 345, bottom = 476),
+
+            // ND row must NOT pick up +/- 3sigma (<0.14) or tolerance bar numbers
+            OcrSpatialLine("Ti", left = 42, top = 485, right = 80, bottom = 515),
+            OcrSpatialLine("ND", left = 148, top = 495, right = 195, bottom = 525),
+            OcrSpatialLine("<0.14", left = 275, top = 501, right = 345, bottom = 531),
+
+            // Missing % column for Mn should NOT fall back to +/- 3sigma column
+            OcrSpatialLine("Mn", left = 42, top = 540, right = 82, bottom = 570),
+            OcrSpatialLine("0.062", left = 275, top = 556, right = 345, bottom = 586)
+        )
+
+        val parsed = SpectrometerTextParser.parseFromSpatialLines(lines, ELEMENT_SYMBOLS)
+        assertEquals("金属", parsed.materialType)
+        assertEquals("6061", parsed.detectedGrade)
+        assertEquals(99.43, parsed.detectedLightElementPct!!, 0.001)
+        assertEquals(0.198, parsed.elements["Fe"]!!, 0.0001)
+        assertEquals(0.147, parsed.elements["Cu"]!!, 0.0001)
+        assertEquals(0.11, parsed.elements["Cr"]!!, 0.0001)
+        assertEquals(0.11, parsed.elements["Ni"]!!, 0.0001)
+        assertFalse(parsed.elements.containsKey("Ti"))
+        assertFalse(parsed.elements.containsKey("Mn"))
+    }
+
+    @Test
     fun xlsxExportRespectsMaintainedFieldsRemovesCaliberAndEmbedsPhotos() {
         val tempPhoto = File.createTempFile("spectra_test_", ".jpg")
         try {

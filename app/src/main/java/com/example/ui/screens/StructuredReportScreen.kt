@@ -550,7 +550,7 @@ private fun TableDataRow(
             val txt = if (isNonMetal) {
                 "-"
             } else {
-                part.elements[sym]?.let { String.format(Locale.US, "%.2f", it) } ?: ""
+                part.elements[sym]?.let { String.format(Locale.US, "%.3f", it).trimEnd('0').trimEnd('.') } ?: ""
             }
             TableCell(
                 text = txt,

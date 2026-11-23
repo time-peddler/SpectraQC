@@ -15,7 +15,7 @@ import kotlin.math.max
 object PhotoStorageHelper {
 
     private const val PHOTOS_DIR = "inspection_photos"
-    private const val MAX_DIMENSION = 1280
+    private const val MAX_DIMENSION = 2560
     private const val JPEG_QUALITY = 85
 
     /**
