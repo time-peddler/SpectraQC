@@ -1,0 +1,6 @@
+{
+  "name": "光谱质检",
+  "description": "工业阀门与设备零部件光谱材质成分采集、拍照OCR自动识别与结构化质检报表应用",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
