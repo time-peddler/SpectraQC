@@ -92,6 +92,21 @@ object SpectrometerTextParser {
         val line: OcrSpatialLine
     )
 
+    private data class DeskewedLine<T>(
+        val item: T,
+        val u: Double,
+        val v: Double,
+        val uLeft: Double,
+        val uRight: Double,
+        val vTop: Double,
+        val vBottom: Double
+    )
+
+    private data class ColumnCluster(
+        var centerU: Double,
+        val members: MutableList<DeskewedLine<ParsedNumericToken>>
+    )
+
     fun reconstructSpatialRows(lines: List<OcrSpatialLine>): List<String> {
         if (lines.isEmpty()) return emptyList()
         val sorted = lines.sortedWith(compareBy<OcrSpatialLine> { it.centerY }.thenBy { it.left })
@@ -134,30 +149,29 @@ object SpectrometerTextParser {
         val elements = linkedMapOf<String, Double>()
         var lightElementPct: Double? = null
 
-        // Stage A: 2D Spatial Column-Row Pairing (handles Olympus Vanta El | % | +/- 3sigma | Bar & tilted screens)
-        val elAnchors = mutableListOf<Pair<String, OcrSpatialLine>>() // "LE" or canonical symbol -> line
+        val elAnchors = mutableListOf<Pair<String, OcrSpatialLine>>()
         val candidateValues = mutableListOf<ParsedNumericToken>()
 
-        // Detect optional header positions to tighten column filtering
         val pctHeader = normalizedLines.firstOrNull {
             val t = it.text.trim()
-            t == "%" || t == "% v" || t == "%✓" || t.startsWith("%")
+            t == "%" || t == "% v" || t == "%✓" || (t.startsWith("%") && t.length <= 5)
         }
-        val sigmaHeader = normalizedLines.firstOrNull {
-            val t = it.text.lowercase(Locale.US)
-            t.contains("+/-") || t.contains("3σ") || t.contains("3o")
+        val sigmaHeader = normalizedLines.firstOrNull { line ->
+            val t = line.text.trim().lowercase(Locale.US)
+            t.contains("+/-") || t.contains("±") || t.contains("3σ") || t.contains("3o") ||
+                (pctHeader != null && (t == "30" || t == "36" || t == "+-30") &&
+                    abs(line.centerY - pctHeader.centerY) <= max(24, pctHeader.height * 2) &&
+                    line.centerX > pctHeader.right)
         }
 
         for (line in normalizedLines) {
             val trimmed = line.text.trim()
-            // Check standalone element token (e.g. "Fe", "[Ni]", "LE")
             val symCandidate = resolveStandaloneElementOrLe(trimmed, canonicalByUpper)
             if (symCandidate != null) {
                 elAnchors += symCandidate to line
                 continue
             }
 
-            // Check standalone numeric or ND token
             val parsedVal = parseStandaloneValueToken(trimmed)
             if (parsedVal != null) {
                 candidateValues += ParsedNumericToken(
@@ -169,40 +183,168 @@ object SpectrometerTextParser {
             }
         }
 
-        if (elAnchors.isNotEmpty() && candidateValues.isNotEmpty()) {
-            // Restrict x range if "%" and "+/-" headers are both cleanly detected
+        val medianHeight = normalizedLines.map { it.height.toDouble() }.sorted()
+            .let { if (it.isEmpty()) 24.0 else it[it.size / 2] }.coerceAtLeast(14.0)
+
+        // Identify if anchors form a single fixed vertical El column (e.g. Olympus Vanta / Niton / Bruker)
+        val primaryElColumn = selectPrimaryVerticalElColumn(elAnchors, medianHeight)
+        val isSingleElColumnTable = primaryElColumn.size >= 2 && candidateValues.isNotEmpty()
+
+        var lockedPctColumnMaxU: Double? = null
+        var cosT = 1.0
+        var sinT = 0.0
+
+        if (isSingleElColumnTable) {
+            // 1. Estimate screen tilt angle from vertical El column (dx = slopeX * dy) and deskew coordinates
+            val sortedRawAnchors = primaryElColumn.sortedBy { it.second.centerY }
+            val meanX = sortedRawAnchors.map { it.second.centerX.toDouble() }.average()
+            val meanY = sortedRawAnchors.map { it.second.centerY.toDouble() }.average()
+            var num = 0.0
+            var den = 0.0
+            for ((_, ln) in sortedRawAnchors) {
+                val dy = ln.centerY - meanY
+                val dx = ln.centerX - meanX
+                num += dy * dx
+                den += dy * dy
+            }
+            val slopeX = if (den > 100.0) (num / den).coerceIn(-0.35, 0.35) else 0.0
+            val theta = kotlin.math.atan(slopeX)
+            cosT = kotlin.math.cos(theta)
+            sinT = kotlin.math.sin(theta)
+
+            fun <T> deskew(item: T, line: OcrSpatialLine): DeskewedLine<T> {
+                val cx = line.centerX.toDouble()
+                val cy = line.centerY.toDouble()
+                val u = cx * cosT - cy * sinT
+                val v = cx * sinT + cy * cosT
+                val hw = line.width / 2.0
+                val hh = line.height / 2.0
+                return DeskewedLine(item, u, v, u - hw, u + hw, v - hh, v + hh)
+            }
+
+            val deskewedAnchors = sortedRawAnchors.map { deskew(it, it.second) }.sortedBy { it.v }
+            val deskewedValues = candidateValues.map { deskew(it, it.line) }
+            val pctHeaderUV = pctHeader?.let { deskew(it, it) }
+            val sigmaHeaderUV = sigmaHeader?.let { deskew(it, it) }
+
+            val elRightU = deskewedAnchors.map { it.uRight }.sorted()[deskewedAnchors.size / 2]
+            val rightValues = deskewedValues.filter { it.u > elRightU + medianHeight * 0.25 }
+
+            // 2. Cluster value tokens vertically by deskewed U to isolate the single "%" column
+            val colClusterTol = max(26.0, medianHeight * 1.45)
+            val clusters = mutableListOf<ColumnCluster>()
+            for (tok in rightValues.sortedBy { it.u }) {
+                val match = clusters.minByOrNull { abs(tok.u - it.centerU) }
+                if (match != null && abs(tok.u - match.centerU) <= colClusterTol) {
+                    match.members += tok
+                    match.centerU = match.members.map { it.u }.average()
+                } else {
+                    clusters += ColumnCluster(tok.u, mutableListOf(tok))
+                }
+            }
+
+            // Pick the "%" column cluster (leftmost valid value column, strictly left of "+/- 3sigma")
+            val validClusters = clusters.filter { cluster ->
+                val alignedCount = deskewedAnchors.count { anchor ->
+                    cluster.members.any { abs(it.v - anchor.v) <= medianHeight * 1.4 }
+                }
+                alignedCount >= 1
+            }
+
+            val pctCluster = selectPctColumnCluster(
+                clusters = validClusters,
+                pctHeaderUV = pctHeaderUV,
+                sigmaHeaderUV = sigmaHeaderUV,
+                medianHeight = medianHeight
+            )
+
+            if (pctCluster != null) {
+                val nextRight = validClusters
+                    .filter { it.centerU > pctCluster.centerU + medianHeight * 1.4 }
+                    .minByOrNull { it.centerU }
+
+                val halfLeft = max(34.0, medianHeight * 2.1)
+                val halfRight = if (nextRight != null) {
+                    min((nextRight.centerU - pctCluster.centerU) * 0.45, max(36.0, medianHeight * 2.1))
+                } else {
+                    max(36.0, medianHeight * 2.1)
+                }
+                val minU = pctCluster.centerU - halfLeft
+                val maxU = if (sigmaHeaderUV != null) {
+                    min(pctCluster.centerU + halfRight, sigmaHeaderUV.u - medianHeight * 0.35)
+                } else {
+                    pctCluster.centerU + halfRight
+                }
+                lockedPctColumnMaxU = maxU
+
+                val pctCandidates = rightValues.filter { it.u in minU..maxU }
+
+                // 3. Strict half-pitch row matching to prevent row-to-row cascading shifts
+                val rowGaps = deskewedAnchors.zipWithNext { a, b -> b.v - a.v }
+                    .filter { it in (medianHeight * 1.05)..(medianHeight * 4.5) }
+                    .sorted()
+                val rowPitch = if (rowGaps.isNotEmpty()) rowGaps[rowGaps.size / 2] else 0.0
+                val strictRowTol = if (rowPitch > 0.0) {
+                    min(rowPitch * 0.43, max(16.0, medianHeight * 1.0))
+                } else {
+                    max(18.0, medianHeight * 1.0)
+                }
+
+                // Measure tiny systematic V offset between El and % column
+                val vDiffs = deskewedAnchors.mapNotNull { anchor ->
+                    val nearest = pctCandidates.minByOrNull { abs(it.v - anchor.v) } ?: return@mapNotNull null
+                    val d = nearest.v - anchor.v
+                    if (abs(d) <= strictRowTol * 1.25) d else null
+                }.sorted()
+                val systematicDv = if (vDiffs.size >= 2) {
+                    vDiffs[vDiffs.size / 2].coerceIn(-medianHeight * 0.65, medianHeight * 0.65)
+                } else {
+                    0.0
+                }
+
+                val usedPctTokens = hashSetOf<OcrSpatialLine>()
+                for (anchor in deskewedAnchors) {
+                    val sym = anchor.item.first
+                    if (sym != "LE" && elements.containsKey(sym)) continue
+
+                    val expectedV = anchor.v + systematicDv
+                    val best = pctCandidates
+                        .filter { it.item.line !in usedPctTokens && abs(it.v - expectedV) <= strictRowTol }
+                        .minByOrNull { abs(it.v - expectedV) }
+                        ?: continue
+
+                    usedPctTokens.add(best.item.line)
+                    val tok = best.item
+                    if (!tok.isNd && !tok.isErrorRangeToken && tok.value != null && tok.value in 0.0..100.0) {
+                        if (sym == "LE") {
+                            if (lightElementPct == null) lightElementPct = tok.value
+                        } else {
+                            elements[sym] = tok.value
+                        }
+                    }
+                }
+            }
+        } else if (elAnchors.isNotEmpty() && candidateValues.isNotEmpty()) {
+            // Fallback for multi-column key-value layouts (e.g. "Fe 70.42%   Cr 18.15")
             val minValX = pctHeader?.let { it.left - it.width } ?: Int.MIN_VALUE
             val maxValX = sigmaHeader?.let { it.left + (it.width / 4) } ?: Int.MAX_VALUE
-
-            // Sort anchors top-to-bottom
             val sortedAnchors = elAnchors.sortedBy { it.second.centerY }
             val usedValueLines = hashSetOf<OcrSpatialLine>()
 
-            // Estimate row tilt dy/dx if possible, or match nearest-right value column
             for ((sym, symLine) in sortedAnchors) {
                 if (sym != "LE" && elements.containsKey(sym)) continue
-
-                // Values must be to the right of the element column and strictly left of +/- 3sigma header if present
-                val rowTolerance = max(28.0, symLine.height * 1.45)
-                val rightCandidates = candidateValues.filter { cand ->
+                val rowTolerance = max(24.0, symLine.height * 1.15)
+                val best = candidateValues.filter { cand ->
                     cand.line !in usedValueLines &&
                         cand.line.centerX > symLine.right - (symLine.width / 3) &&
                         (sigmaHeader == null || cand.line.centerX < sigmaHeader.left) &&
                         abs(cand.line.centerY - symLine.centerY) <= rowTolerance
                 }.sortedWith(
-                    compareBy<ParsedNumericToken> { cand ->
-                        // Prefer tokens inside [% column .. +/- column) if header detected
-                        val inPctBand = cand.line.centerX in minValX..maxValX
-                        if (inPctBand) 0 else 1
-                    }.thenBy { cand ->
-                        // Pick the LEFTMOST value column first (% column is always left of +/- 3sigma column!)
-                        cand.line.left
-                    }.thenBy { cand ->
-                        abs(cand.line.centerY - symLine.centerY)
-                    }
-                )
+                    compareBy<ParsedNumericToken> { if (it.line.centerX in minValX..maxValX) 0 else 1 }
+                        .thenBy { it.line.left }
+                        .thenBy { abs(it.line.centerY - symLine.centerY) }
+                ).firstOrNull() ?: continue
 
-                val best = rightCandidates.firstOrNull() ?: continue
                 usedValueLines.add(best.line)
                 if (!best.isNd && !best.isErrorRangeToken && best.value != null && best.value in 0.0..100.0) {
                     if (sym == "LE") {
@@ -214,17 +356,29 @@ object SpectrometerTextParser {
             }
         }
 
-        // Stage B: Reconstruct horizontal rows (excluding +/- 3sigma & tolerance bar columns below header) & run inline parsing
-        val stageBLines = if (sigmaHeader != null) {
-            normalizedLines.filter { line ->
-                line.bottom <= sigmaHeader.bottom || line.centerX < sigmaHeader.left
+        // Stage B: Only parse inline lines strictly within the "%" column boundary (never +/- 3sigma),
+        // and disable cross-line vertical fallback when a spectrometer column grid was already locked.
+        val stageBLines = when {
+            lockedPctColumnMaxU != null -> {
+                normalizedLines.filter { line ->
+                    val u = line.centerX * cosT - line.centerY * sinT
+                    u <= lockedPctColumnMaxU
+                }
             }
-        } else {
-            normalizedLines
+            sigmaHeader != null -> {
+                normalizedLines.filter { line ->
+                    line.bottom <= sigmaHeader.bottom || line.centerX < sigmaHeader.left
+                }
+            }
+            else -> normalizedLines
         }
         val reconstructed = reconstructSpatialRows(stageBLines)
         val combinedText = reconstructed.joinToString("\n")
-        val textParsed = parsePlainText(combinedText, targetElements)
+        val textParsed = parsePlainText(
+            rawText = combinedText,
+            targetElements = targetElements,
+            allowVerticalPairFallback = lockedPctColumnMaxU == null
+        )
 
         for ((k, v) in textParsed.elements) {
             if (!elements.containsKey(k)) {
@@ -235,8 +389,9 @@ object SpectrometerTextParser {
             lightElementPct = textParsed.detectedLightElementPct
         }
 
-        val detectedGrade = extractBestGrade(normalizedLines.map { it.text }, combinedText)
-        val isNonMetal = nonMetalKeywords.any { combinedText.contains(it, ignoreCase = true) } && elements.isEmpty()
+        val allText = reconstructSpatialRows(normalizedLines).joinToString("\n")
+        val detectedGrade = extractBestGrade(normalizedLines.map { it.text }, allText)
+        val isNonMetal = nonMetalKeywords.any { allText.contains(it, ignoreCase = true) } && elements.isEmpty()
         val materialType = if (isNonMetal) "非金属" else "金属"
 
         return SpectrometerOcrResult(
@@ -248,9 +403,68 @@ object SpectrometerTextParser {
         )
     }
 
+    private fun selectPrimaryVerticalElColumn(
+        elAnchors: List<Pair<String, OcrSpatialLine>>,
+        medianHeight: Double
+    ): List<Pair<String, OcrSpatialLine>> {
+        if (elAnchors.size < 2) return emptyList()
+        val xTol = max(32.0, medianHeight * 2.2)
+        var bestCluster = emptyList<Pair<String, OcrSpatialLine>>()
+
+        for (seed in elAnchors) {
+            val col = elAnchors
+                .filter { abs(it.second.centerX - seed.second.centerX) <= xTol }
+                .sortedBy { it.second.centerY }
+            // Ensure anchors in this cluster occupy distinct vertical rows (not horizontal pairs)
+            val distinctRowCount = col.fold(mutableListOf<Pair<String, OcrSpatialLine>>()) { acc, item ->
+                val last = acc.lastOrNull()
+                if (last == null || item.second.centerY - last.second.centerY >= medianHeight * 0.7) {
+                    acc += item
+                }
+                acc
+            }
+            if (distinctRowCount.size > bestCluster.size) {
+                bestCluster = distinctRowCount
+            }
+        }
+        return bestCluster
+    }
+
+    private fun selectPctColumnCluster(
+        clusters: List<ColumnCluster>,
+        pctHeaderUV: DeskewedLine<OcrSpatialLine>?,
+        sigmaHeaderUV: DeskewedLine<OcrSpatialLine>?,
+        medianHeight: Double
+    ): ColumnCluster? {
+        if (clusters.isEmpty()) return null
+        val sorted = clusters.sortedBy { it.centerU }
+
+        val leftOfSigma = if (sigmaHeaderUV != null) {
+            sorted.filter { it.centerU < sigmaHeaderUV.u - medianHeight * 0.4 }.ifEmpty { sorted }
+        } else {
+            sorted
+        }
+
+        if (pctHeaderUV != null) {
+            val nearHeader = leftOfSigma.minByOrNull { abs(it.centerU - pctHeaderUV.u) }
+            if (nearHeader != null && abs(nearHeader.centerU - pctHeaderUV.u) <= max(60.0, medianHeight * 3.5)) {
+                return nearHeader
+            }
+        }
+
+        // Prefer the leftmost cluster with >= 2 tokens that isn't mostly "<LOD" error tokens
+        return leftOfSigma.firstOrNull { cluster ->
+            val errCount = cluster.members.count { it.item.isErrorRangeToken }
+            cluster.members.size >= 2 && errCount * 2 < cluster.members.size
+        } ?: leftOfSigma.firstOrNull { cluster ->
+            cluster.members.any { !it.item.isErrorRangeToken }
+        } ?: leftOfSigma.firstOrNull()
+    }
+
     fun parsePlainText(
         rawText: String,
-        targetElements: List<String> = ELEMENT_SYMBOLS
+        targetElements: List<String> = ELEMENT_SYMBOLS,
+        allowVerticalPairFallback: Boolean = true
     ): SpectrometerOcrResult {
         val cleanText = normalizeOcrLineText(rawText).trim()
 
@@ -307,15 +521,17 @@ object SpectrometerTextParser {
             }
 
             // Pattern B: vertical pairing where symbol is alone on line i and value is alone on line i+1
-            val lines = cleanText.lines().map { it.trim() }.filter { it.isNotEmpty() }
-            for (i in 0 until lines.lastIndex) {
-                val sym = resolveStandaloneElementOrLe(lines[i], canonicalByUpper) ?: continue
-                val valPair = parseStandaloneValueToken(lines[i + 1]) ?: continue
-                if (!valPair.second && valPair.first != null && valPair.first!! in 0.0..100.0) {
-                    if (sym == "LE") {
-                        if (lightElementPct == null) lightElementPct = valPair.first
-                    } else if (!elements.containsKey(sym)) {
-                        elements[sym] = valPair.first!!
+            if (allowVerticalPairFallback) {
+                val lines = cleanText.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                for (i in 0 until lines.lastIndex) {
+                    val sym = resolveStandaloneElementOrLe(lines[i], canonicalByUpper) ?: continue
+                    val valPair = parseStandaloneValueToken(lines[i + 1]) ?: continue
+                    if (!valPair.second && valPair.first != null && valPair.first!! in 0.0..100.0) {
+                        if (sym == "LE") {
+                            if (lightElementPct == null) lightElementPct = valPair.first
+                        } else if (!elements.containsKey(sym)) {
+                            elements[sym] = valPair.first!!
+                        }
                     }
                 }
             }
@@ -459,16 +675,39 @@ class SpectrometerOcrRepository {
                 // Stage 1: Full-frame sweep (0°, then 90°/270°/180° if needed)
                 var bestAttempt = runMultiOrientationSweep(baseBitmap, targetElements)
 
-                // Stage 2: If fewer than 2 elements found, crop bright LCD screen ROI, boost contrast, and re-sweep
-                if (bestAttempt.result.elements.size < 2) {
+                // Stage 2: Always try LCD screen ROI crop + upscale + contrast boost unless >= 5 elements already extracted
+                if (bestAttempt.result.elements.size < 5) {
                     val lcdBitmap = withContext(Dispatchers.Default) {
                         extractEnhancedLcdRegion(baseBitmap)
                     }
                     if (lcdBitmap != null) {
                         try {
-                            val lcdAttempt = runMultiOrientationSweep(lcdBitmap, targetElements)
+                            val lcdAttempt = runMultiOrientationSweep(
+                                source = lcdBitmap,
+                                targetElements = targetElements,
+                                preferredRotation = bestAttempt.rotation
+                            )
                             if (lcdAttempt.score > bestAttempt.score) {
                                 bestAttempt = lcdAttempt
+                            }
+
+                            // Stage 3: High-contrast grayscale pass on cropped LCD to remove RGB moire fringes
+                            if (bestAttempt.result.elements.size < 4) {
+                                val grayLcd = withContext(Dispatchers.Default) {
+                                    toHighContrastGrayscale(lcdBitmap)
+                                }
+                                try {
+                                    val grayAttempt = runSingleOrientationOcr(
+                                        source = grayLcd,
+                                        degrees = bestAttempt.rotation,
+                                        targetElements = targetElements
+                                    )
+                                    if (grayAttempt.score > bestAttempt.score) {
+                                        bestAttempt = grayAttempt
+                                    }
+                                } finally {
+                                    if (!grayLcd.isRecycled) grayLcd.recycle()
+                                }
                             }
                         } finally {
                             if (!lcdBitmap.isRecycled) lcdBitmap.recycle()
@@ -509,68 +748,28 @@ class SpectrometerOcrRepository {
 
     private suspend fun runMultiOrientationSweep(
         source: Bitmap,
-        targetElements: List<String>
+        targetElements: List<String>,
+        preferredRotation: Int = 0
     ): OcrSweepAttempt {
-        val rotations = listOf(0, 90, 270, 180)
+        val baseOrder = listOf(0, 90, 270, 180)
+        val rotations = if (preferredRotation in baseOrder) {
+            listOf(preferredRotation) + baseOrder.filter { it != preferredRotation }
+        } else {
+            baseOrder
+        }
         var best: OcrSweepAttempt? = null
 
         for (deg in rotations) {
-            val rotated = if (deg == 0) source else rotateBitmap(source, deg.toFloat())
-            try {
-                val inputImage = InputImage.fromBitmap(rotated, 0)
-                val visionText = recognizer.process(inputImage).awaitResult()
+            val candidate = runSingleOrientationOcr(source, deg, targetElements)
+            if (best == null || candidate.score > best.score) {
+                best = candidate
+            }
 
-                val spatialLines = mutableListOf<OcrSpatialLine>()
-                for (block in visionText.textBlocks) {
-                    for (line in block.lines) {
-                        val box = line.boundingBox
-                        if (box != null) {
-                            spatialLines += OcrSpatialLine(
-                                text = line.text,
-                                left = box.left,
-                                top = box.top,
-                                right = box.right,
-                                bottom = box.bottom
-                            )
-                        } else {
-                            spatialLines += OcrSpatialLine(line.text, 0, spatialLines.size * 30, 100, spatialLines.size * 30 + 24)
-                        }
-                    }
-                }
-
-                val parsed = if (spatialLines.isNotEmpty()) {
-                    SpectrometerTextParser.parseFromSpatialLines(spatialLines, targetElements)
-                } else {
-                    SpectrometerTextParser.parsePlainText(visionText.text, targetElements)
-                }
-
-                val hasTableCues = visionText.text.contains("LE", ignoreCase = true) ||
-                    visionText.text.contains("ND", ignoreCase = true) ||
-                    visionText.text.contains("%")
-                val score = parsed.elements.size * 10 +
-                    (if (parsed.detectedGrade.isNotBlank()) 4 else 0) +
-                    (if (parsed.detectedLightElementPct != null) 4 else 0) +
-                    (if (hasTableCues) 3 else 0) +
-                    spatialLines.size.coerceAtMost(5)
-
-                val candidate = OcrSweepAttempt(
-                    result = parsed,
-                    score = score,
-                    rotation = deg,
-                    rawSnippet = visionText.text.replace("\n", " / ")
-                )
-                if (best == null || candidate.score > best.score) {
-                    best = candidate
-                }
-
-                // Short-circuit immediately once a clear spectrometer table (>= 3 elements) is extracted
-                if (parsed.elements.size >= 3 && (parsed.detectedGrade.isNotBlank() || parsed.detectedLightElementPct != null)) {
-                    break
-                }
-            } finally {
-                if (deg != 0 && rotated !== source && !rotated.isRecycled) {
-                    rotated.recycle()
-                }
+            // Short-circuit only when a clear multi-element table (>= 4 elements) with grade/LE is extracted
+            if (candidate.result.elements.size >= 4 &&
+                (candidate.result.detectedGrade.isNotBlank() || candidate.result.detectedLightElementPct != null)
+            ) {
+                break
             }
         }
 
@@ -582,9 +781,111 @@ class SpectrometerOcrRepository {
         )
     }
 
+    private suspend fun runSingleOrientationOcr(
+        source: Bitmap,
+        degrees: Int,
+        targetElements: List<String>
+    ): OcrSweepAttempt {
+        val rotated = if (degrees == 0) source else rotateBitmap(source, degrees.toFloat())
+        return try {
+            val inputImage = InputImage.fromBitmap(rotated, 0)
+            val visionText = recognizer.process(inputImage).awaitResult()
+            val spatialLines = extractCellLines(visionText)
+
+            val parsed = if (spatialLines.isNotEmpty()) {
+                SpectrometerTextParser.parseFromSpatialLines(spatialLines, targetElements)
+            } else {
+                SpectrometerTextParser.parsePlainText(visionText.text, targetElements)
+            }
+
+            val hasTableCues = visionText.text.contains("LE", ignoreCase = true) ||
+                visionText.text.contains("ND", ignoreCase = true) ||
+                visionText.text.contains("%")
+            val score = parsed.elements.size * 10 +
+                (if (parsed.detectedGrade.isNotBlank()) 4 else 0) +
+                (if (parsed.detectedLightElementPct != null) 4 else 0) +
+                (if (hasTableCues) 3 else 0) +
+                spatialLines.size.coerceAtMost(5)
+
+            OcrSweepAttempt(
+                result = parsed,
+                score = score,
+                rotation = degrees,
+                rawSnippet = visionText.text.replace("\n", " / ")
+            )
+        } finally {
+            if (degrees != 0 && rotated !== source && !rotated.isRecycled) {
+                rotated.recycle()
+            }
+        }
+    }
+
     /**
-     * Locates the bright white/gray spectrometer LCD screen inside a photo, crops it with padding,
-     * upscales if needed, and applies mild contrast enhancement for crisp digit OCR.
+     * Splits multi-column ML Kit Text.Lines into individual cell boxes at wide horizontal column gaps,
+     * while preserving tight tokens (like "0.198", "<0.14", "+/- 3sigma") inside one cell.
+     */
+    private fun extractCellLines(visionText: com.google.mlkit.vision.text.Text): List<OcrSpatialLine> {
+        val cells = mutableListOf<OcrSpatialLine>()
+        for (block in visionText.textBlocks) {
+            for (line in block.lines) {
+                val elems = line.elements
+                val lineHeight = line.boundingBox?.height()?.coerceAtLeast(12) ?: 24
+                if (elems.size <= 1) {
+                    val box = line.boundingBox
+                    if (box != null) {
+                        cells += OcrSpatialLine(line.text, box.left, box.top, box.right, box.bottom)
+                    } else {
+                        cells += OcrSpatialLine(line.text, 0, cells.size * 30, 100, cells.size * 30 + 24)
+                    }
+                    continue
+                }
+
+                val splitGap = max(6, (lineHeight * 0.55f).toInt())
+                var curText = StringBuilder(elems[0].text)
+                var curBox = elems[0].boundingBox
+                for (i in 1 until elems.size) {
+                    val next = elems[i]
+                    val nextBox = next.boundingBox
+                    val gap = if (curBox != null && nextBox != null) nextBox.left - curBox.right else 0
+                    val prevStr = curText.toString().trim()
+                    val nextStr = next.text.trim()
+                    val keepTogether = prevStr.endsWith(".") || nextStr.startsWith(".") ||
+                        prevStr == "<" || prevStr == "+/-" ||
+                        (prevStr == "%" && nextStr.equals("v", ignoreCase = true))
+
+                    if (gap <= splitGap || keepTogether) {
+                        if (curBox != null && nextBox != null) {
+                            curBox = android.graphics.Rect(
+                                min(curBox.left, nextBox.left),
+                                min(curBox.top, nextBox.top),
+                                max(curBox.right, nextBox.right),
+                                max(curBox.bottom, nextBox.bottom)
+                            )
+                        }
+                        if (prevStr.endsWith(".") || nextStr.startsWith(".") || prevStr == "<") {
+                            curText.append(next.text)
+                        } else {
+                            curText.append(' ').append(next.text)
+                        }
+                    } else {
+                        if (curBox != null) {
+                            cells += OcrSpatialLine(curText.toString(), curBox.left, curBox.top, curBox.right, curBox.bottom)
+                        }
+                        curText = StringBuilder(next.text)
+                        curBox = nextBox
+                    }
+                }
+                if (curBox != null) {
+                    cells += OcrSpatialLine(curText.toString(), curBox.left, curBox.top, curBox.right, curBox.bottom)
+                }
+            }
+        }
+        return cells
+    }
+
+    /**
+     * Locates the bright white/gray spectrometer LCD screen inside a photo, crops it with 4-side padding
+     * (so the blue header bar is kept regardless of phone orientation), upscales if needed, and boosts contrast.
      */
     private fun extractEnhancedLcdRegion(source: Bitmap): Bitmap? {
         val w = source.width
@@ -690,15 +991,14 @@ class SpectrometerOcrRepository {
             return null
         }
 
-        // Pad upward slightly more (22%) to keep the blue Alloy/Grade header bar above the white table
-        val padX = (compW * 0.08f).toInt().coerceAtLeast(2)
-        val padTop = (compH * 0.22f).toInt().coerceAtLeast(4)
-        val padBottom = (compH * 0.08f).toInt().coerceAtLeast(2)
+        // Pad all 4 sides generously (16%) so the blue Alloy/Grade header bar stays inside regardless of camera orientation
+        val padX = (compW * 0.16f).toInt().coerceAtLeast(4)
+        val padY = (compH * 0.16f).toInt().coerceAtLeast(4)
 
         val cropLeft = (((bestMinX - padX).coerceAtLeast(0).toFloat() / gridW) * w).toInt()
-        val cropTop = (((bestMinY - padTop).coerceAtLeast(0).toFloat() / gridH) * h).toInt()
+        val cropTop = (((bestMinY - padY).coerceAtLeast(0).toFloat() / gridH) * h).toInt()
         val cropRight = (((bestMaxX + padX).coerceAtMost(gridW - 1).toFloat() / gridW) * w).toInt()
-        val cropBottom = (((bestMaxY + padBottom).coerceAtMost(gridH - 1).toFloat() / gridH) * h).toInt()
+        val cropBottom = (((bestMaxY + padY).coerceAtMost(gridH - 1).toFloat() / gridH) * h).toInt()
 
         val cropW = (cropRight - cropLeft).coerceAtLeast(1)
         val cropH = (cropBottom - cropTop).coerceAtLeast(1)
@@ -706,8 +1006,8 @@ class SpectrometerOcrRepository {
 
         val cropped = Bitmap.createBitmap(source, cropLeft, cropTop, cropW, cropH)
         val maxSide = max(cropW, cropH)
-        val targetBitmap = if (maxSide < 1400) {
-            val scale = 1400f / maxSide.toFloat()
+        val targetBitmap = if (maxSide < 1500) {
+            val scale = 1500f / maxSide.toFloat()
             val upscaled = Bitmap.createScaledBitmap(
                 cropped,
                 (cropW * scale).toInt(),
@@ -739,6 +1039,28 @@ class SpectrometerOcrRepository {
         canvas.drawBitmap(targetBitmap, 0f, 0f, paint)
         targetBitmap.recycle()
         return enhanced
+    }
+
+    private fun toHighContrastGrayscale(source: Bitmap): Bitmap {
+        val out = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        val gray = ColorMatrix().apply { setSaturation(0f) }
+        val contrast = 1.35f
+        val translate = (-0.5f * contrast + 0.5f) * 255f
+        val contrastMatrix = ColorMatrix(
+            floatArrayOf(
+                contrast, 0f, 0f, 0f, translate,
+                0f, contrast, 0f, 0f, translate,
+                0f, 0f, contrast, 0f, translate,
+                0f, 0f, 0f, 1f, 0f
+            )
+        )
+        gray.postConcat(contrastMatrix)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+            colorFilter = ColorMatrixColorFilter(gray)
+        }
+        canvas.drawBitmap(source, 0f, 0f, paint)
+        return out
     }
 
     private fun rotateBitmap(source: Bitmap, degrees: Float): Bitmap {

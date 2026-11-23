@@ -128,6 +128,51 @@ class InspectionLogicTest {
     }
 
     @Test
+    fun olympusVantaMissingRowAndMissingHeadersNeverCauseRowOrColumnShift() {
+        // Photo 3 style: 10-degree tilt, NO "%" or "+/- 3sigma" headers recognized,
+        // and Fe's "%" value was missed by OCR -> Fe MUST stay empty instead of stealing Ni's 0.132 or Fe's 3sigma 0.065!
+        val lines = listOf(
+            OcrSpatialLine("6061", left = 180, top = 40, right = 270, bottom = 80),
+
+            // Tilted column: as Y increases by +55 per row, X shifts right by +8 and Y shifts down by -14 across columns
+            OcrSpatialLine("LE", left = 40, top = 120, right = 78, bottom = 148),
+            OcrSpatialLine("99.29", left = 135, top = 108, right = 205, bottom = 136),
+            OcrSpatialLine("0.14", left = 250, top = 96, right = 308, bottom = 124),
+
+            OcrSpatialLine("Cu", left = 48, top = 175, right = 88, bottom = 203),
+            OcrSpatialLine("0.172", left = 143, top = 163, right = 213, bottom = 191),
+            OcrSpatialLine("0.038", left = 258, top = 151, right = 323, bottom = 179),
+
+            // Fe has NO % value recognized, only its +/- 3sigma (0.065) and grade bar numbers (0.00 / 0.70)
+            OcrSpatialLine("Fe", left = 56, top = 230, right = 94, bottom = 258),
+            OcrSpatialLine("0.065", left = 266, top = 206, right = 331, bottom = 234),
+            OcrSpatialLine("0.70", left = 375, top = 196, right = 425, bottom = 218),
+
+            // Ni is next row down — must keep 0.132 cleanly without shifting up to Fe!
+            OcrSpatialLine("Nl", left = 64, top = 285, right = 102, bottom = 313),
+            OcrSpatialLine("0.132", left = 159, top = 273, right = 229, bottom = 301),
+            OcrSpatialLine("0.039", left = 274, top = 261, right = 339, bottom = 289),
+
+            OcrSpatialLine("Cr", left = 72, top = 340, right = 110, bottom = 368),
+            OcrSpatialLine("0.125", left = 167, top = 328, right = 237, bottom = 356),
+            OcrSpatialLine("0.097", left = 282, top = 316, right = 347, bottom = 344),
+
+            OcrSpatialLine("Ti", left = 80, top = 395, right = 116, bottom = 423),
+            OcrSpatialLine("ND", left = 175, top = 383, right = 218, bottom = 411),
+            OcrSpatialLine("<0.10", left = 290, top = 371, right = 355, bottom = 399)
+        )
+
+        val parsed = SpectrometerTextParser.parseFromSpatialLines(lines, ELEMENT_SYMBOLS)
+        assertEquals("6061", parsed.detectedGrade)
+        assertEquals(99.29, parsed.detectedLightElementPct!!, 0.001)
+        assertEquals(0.172, parsed.elements["Cu"]!!, 0.0001)
+        assertFalse("Fe must NOT steal 3sigma 0.065 or Ni's 0.132", parsed.elements.containsKey("Fe"))
+        assertEquals(0.132, parsed.elements["Ni"]!!, 0.0001)
+        assertEquals(0.125, parsed.elements["Cr"]!!, 0.0001)
+        assertFalse(parsed.elements.containsKey("Ti"))
+    }
+
+    @Test
     fun xlsxExportRespectsMaintainedFieldsRemovesCaliberAndEmbedsPhotos() {
         val tempPhoto = File.createTempFile("spectra_test_", ".jpg")
         try {

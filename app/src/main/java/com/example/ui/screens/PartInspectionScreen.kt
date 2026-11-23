@@ -182,10 +182,10 @@ fun PartInspectionScreen(
                     detectedGrade = res.detectedGrade
                 }
                 ocrSummary = res.rawOcrSummary
-                for (symbol in activeElements) {
-                    val v = res.elements[symbol]
-                    if (v != null) {
-                        elementTextMap[symbol] = formatElementValue(v)
+                if (res.elements.isNotEmpty()) {
+                    for (symbol in activeElements) {
+                        val v = res.elements[symbol]
+                        elementTextMap[symbol] = if (v != null) formatElementValue(v) else ""
                     }
                 }
             }
