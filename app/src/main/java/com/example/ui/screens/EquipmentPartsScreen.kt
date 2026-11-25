@@ -325,15 +325,17 @@ private fun PartRowCard(
         part.photoPath.isNotBlank() && File(part.photoPath).exists()
     }
 
-    val topElementsText = remember(part.elements, status, activeSymbols) {
+    val topElementsText = remember(part.elements, part.ndElements, status, activeSymbols) {
         if (status == PartStatus.NON_METAL) {
             "非金属 · CuZn 0%"
         } else {
             val active = activeSymbols.mapNotNull { sym ->
                 val v = part.elements[sym]
-                if (v != null && v > 0.0) {
-                    "$sym ${String.format(Locale.US, "%.3f", v).trimEnd('0').trimEnd('.')}%"
-                } else null
+                when {
+                    v != null && v > 0.0 -> "$sym ${String.format(Locale.US, "%.3f", v).trimEnd('0').trimEnd('.')}%"
+                    sym in part.ndElements -> "$sym ND"
+                    else -> null
+                }
             }
             if (active.isEmpty()) "点击离线拍照识别光谱结果"
             else active.take(4).joinToString(" · ")

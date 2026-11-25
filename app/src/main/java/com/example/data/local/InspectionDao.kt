@@ -65,6 +65,9 @@ interface InspectionDao {
     @Update
     suspend fun updatePart(part: ComponentPartEntity)
 
+    @Query("UPDATE component_parts SET photoPath = :photoPath, updatedAt = :updatedAt WHERE id = :partId")
+    suspend fun updatePartPhotoPath(partId: String, photoPath: String, updatedAt: Long)
+
     @Query("DELETE FROM component_parts WHERE id = :partId")
     suspend fun deletePartById(partId: String)
 

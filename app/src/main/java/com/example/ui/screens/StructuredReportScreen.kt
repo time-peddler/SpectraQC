@@ -547,15 +547,16 @@ private fun TableDataRow(
         TableCell(part.quantity, 48.dp, textColor, mono = true)
 
         for (sym in elements) {
-            val txt = if (isNonMetal) {
-                "-"
-            } else {
-                part.elements[sym]?.let { String.format(Locale.US, "%.3f", it).trimEnd('0').trimEnd('.') } ?: ""
+            val txt = when {
+                isNonMetal -> "-"
+                part.elements[sym] != null -> String.format(Locale.US, "%.3f", part.elements[sym]!!).trimEnd('0').trimEnd('.')
+                sym in part.ndElements -> "ND"
+                else -> ""
             }
             TableCell(
                 text = txt,
                 width = 58.dp,
-                color = if (txt.isNotBlank() && txt != "-") MaterialTheme.colorScheme.primary else textColor,
+                color = if (part.elements[sym] != null) MaterialTheme.colorScheme.primary else textColor,
                 mono = true
             )
         }

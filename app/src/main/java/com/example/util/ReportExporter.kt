@@ -356,8 +356,11 @@ object ReportExporter {
                         cellRow.add(XlsxCellValue.Text("-", 4))
                     } else {
                         val v = part.elements[sym]
-                        if (v != null) cellRow.add(XlsxCellValue.Num(v, elemStyle))
-                        else cellRow.add(XlsxCellValue.Text("", elemStyle))
+                        when {
+                            v != null -> cellRow.add(XlsxCellValue.Num(v, elemStyle))
+                            sym in part.ndElements -> cellRow.add(XlsxCellValue.Text("ND", elemStyle))
+                            else -> cellRow.add(XlsxCellValue.Text("", elemStyle))
+                        }
                     }
                 }
 
@@ -499,8 +502,11 @@ object ReportExporter {
                         cellRow.add(XlsxCellValue.Text("-", 4))
                     } else {
                         val v = part.elements[sym]
-                        if (v != null) cellRow.add(XlsxCellValue.Num(v, elemStyle))
-                        else cellRow.add(XlsxCellValue.Text("", elemStyle))
+                        when {
+                            v != null -> cellRow.add(XlsxCellValue.Num(v, elemStyle))
+                            sym in part.ndElements -> cellRow.add(XlsxCellValue.Text("ND", elemStyle))
+                            else -> cellRow.add(XlsxCellValue.Text("", elemStyle))
+                        }
                     }
                 }
 

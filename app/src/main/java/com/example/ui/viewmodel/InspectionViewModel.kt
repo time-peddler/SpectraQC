@@ -32,7 +32,7 @@ import kotlinx.coroutines.launch
 
 sealed interface OcrUiState {
     data object Idle : OcrUiState
-    data object Analyzing : OcrUiState
+    data class Analyzing(val savedPhotoPath: String = "") : OcrUiState
     data class Recognized(val result: SpectrometerOcrResult, val savedPhotoPath: String) : OcrUiState
     data class Error(val message: String, val savedPhotoPath: String = "") : OcrUiState
 }
@@ -315,7 +315,7 @@ class InspectionViewModel(
         previousPhotoPath: String
     ) {
         viewModelScope.launch {
-            _ocrState.value = OcrUiState.Analyzing
+            _ocrState.value = OcrUiState.Analyzing(previousPhotoPath)
             val persistRes = PhotoStorageHelper.persistInspectionPhoto(
                 context = context,
                 sourceUri = imageUri,
@@ -324,8 +324,18 @@ class InspectionViewModel(
                 previousPhotoPath = previousPhotoPath
             )
             val savedPath = persistRes.getOrNull().orEmpty()
-            val targetElements = templateConfigState.value.activeElementSymbols()
+            if (savedPath.isBlank()) {
+                val errMsg = persistRes.exceptionOrNull()?.localizedMessage ?: "照片保存到本地失败，请重新拍摄或选图"
+                _statusMessage.value = errMsg
+                _ocrState.value = OcrUiState.Error(message = errMsg, savedPhotoPath = previousPhotoPath)
+                return@launch
+            }
 
+            // Persist photoPath into Room immediately so exiting or switching parts never loses the photo
+            repository.savePartPhoto(partId, savedPath)
+            _ocrState.value = OcrUiState.Analyzing(savedPath)
+
+            val targetElements = templateConfigState.value.activeElementSymbols()
             val ocrRes = ocrRepository.recognizeSpectrometerPhoto(
                 context = context,
                 imageSource = imageUri,

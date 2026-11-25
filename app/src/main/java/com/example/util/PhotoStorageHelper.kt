@@ -34,18 +34,27 @@ object PhotoStorageHelper {
             val dir = File(context.filesDir, PHOTOS_DIR).apply { mkdirs() }
             val destFile = File(dir, "part_${equipmentId.take(8)}_${partId.take(8)}_${System.currentTimeMillis()}.jpg")
 
-            val decoded = decodeOrientedBitmap(context, sourceUri, MAX_DIMENSION)
-                ?: return@withContext Result.failure(IllegalArgumentException("无法读取照片内容，请重新拍摄或选图"))
+            val decoded = runCatching { decodeOrientedBitmap(context, sourceUri, MAX_DIMENSION) }.getOrNull()
+            if (decoded != null) {
+                try {
+                    FileOutputStream(destFile).use { fos ->
+                        decoded.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, fos)
+                        fos.flush()
+                    }
+                } finally {
+                    if (!decoded.isRecycled) {
+                        decoded.recycle()
+                    }
+                }
+            } else {
+                val copied = copyRawUriToFile(context, sourceUri, destFile)
+                if (!copied) {
+                    return@withContext Result.failure(IllegalArgumentException("无法读取照片内容，请重新拍摄或选图"))
+                }
+            }
 
-            try {
-                FileOutputStream(destFile).use { fos ->
-                    decoded.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, fos)
-                    fos.flush()
-                }
-            } finally {
-                if (!decoded.isRecycled) {
-                    decoded.recycle()
-                }
+            if (!destFile.exists() || destFile.length() <= 0L) {
+                return@withContext Result.failure(IllegalStateException("照片写入本地存储失败"))
             }
 
             if (previousPhotoPath.isNotBlank() && previousPhotoPath != destFile.absolutePath) {
@@ -60,6 +69,20 @@ object PhotoStorageHelper {
             Result.success(destFile.absolutePath)
         } catch (e: Exception) {
             Result.failure(e)
+        }
+    }
+
+    private fun copyRawUriToFile(context: Context, uri: Uri, destFile: File): Boolean {
+        return try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(destFile).use { output ->
+                    input.copyTo(output)
+                    output.flush()
+                }
+                true
+            } ?: false
+        } catch (_: Exception) {
+            false
         }
     }
 

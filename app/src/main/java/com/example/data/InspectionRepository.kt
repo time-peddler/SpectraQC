@@ -474,6 +474,18 @@ class InspectionRepository(
         }
     }
 
+    suspend fun savePartPhoto(partId: String, photoPath: String): Result<Unit> {
+        return try {
+            require(partId.isNotBlank() && photoPath.isNotBlank())
+            dao.updatePartPhotoPath(partId, photoPath, System.currentTimeMillis())
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     suspend fun savePartInspection(
         equipmentId: String,
         updatedPart: ComponentInspection,
@@ -487,6 +499,9 @@ class InspectionRepository(
             val sanitizedElements = updatedPart.elements
                 .filterKeys { it in allowedSet || it.isNotBlank() }
                 .mapValues { (_, v) -> v.coerceIn(0.0, 100.0) }
+            val sanitizedNdElements = updatedPart.ndElements
+                .filter { it !in sanitizedElements && (it in allowedSet || it.isNotBlank()) }
+                .toSet()
 
             val mergedCompletedCount = allPartsForEquipment.count { existingPart ->
                 val status = if (existingPart.id == updatedPart.id) {
@@ -500,6 +515,7 @@ class InspectionRepository(
             val cleanedPart = updatedPart.copy(
                 equipmentId = equipmentId,
                 elements = sanitizedElements,
+                ndElements = sanitizedNdElements,
                 updatedAt = now
             )
 

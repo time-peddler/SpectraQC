@@ -61,6 +61,17 @@ class ElementMapConverter {
             emptyMap()
         }
     }
+
+    @TypeConverter
+    fun fromStringSet(set: Set<String>): String {
+        return set.filter { it.isNotBlank() }.joinToString(",")
+    }
+
+    @TypeConverter
+    fun toStringSet(raw: String): Set<String> {
+        if (raw.isBlank()) return emptySet()
+        return raw.split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+    }
 }
 
 @Entity(tableName = "report_meta")
@@ -207,6 +218,7 @@ data class ComponentPartEntity(
     val materialType: String,
     val detectedGrade: String,
     val elements: Map<String, Double>,
+    val ndElements: Set<String> = emptySet(),
     val cuZnImpurity: String,
     val severityS: String,
     val motionState: String,
@@ -240,6 +252,7 @@ data class ComponentPartEntity(
         materialType = materialType,
         detectedGrade = detectedGrade,
         elements = elements,
+        ndElements = ndElements,
         cuZnImpurity = cuZnImpurity,
         severityS = severityS,
         motionState = motionState,
@@ -275,6 +288,7 @@ data class ComponentPartEntity(
             materialType = part.materialType,
             detectedGrade = part.detectedGrade,
             elements = part.elements,
+            ndElements = part.ndElements,
             cuZnImpurity = part.cuZnImpurity,
             severityS = part.severityS,
             motionState = part.motionState,

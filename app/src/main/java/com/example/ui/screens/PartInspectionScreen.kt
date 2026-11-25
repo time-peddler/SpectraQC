@@ -66,6 +66,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -81,6 +82,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
+import com.example.data.SpectrometerTextParser
 import com.example.model.ComponentInspection
 import com.example.model.DefaultFieldCandidates
 import com.example.model.EquipmentRecord
@@ -131,7 +133,7 @@ fun PartInspectionScreen(
     var ocrSummary by remember(part.id) { mutableStateOf(part.ocrSummary) }
     var savedPhotoPath by remember(part.id) { mutableStateOf(part.photoPath) }
     var capturedImageUri by remember(part.id) { mutableStateOf<Uri?>(null) }
-    var pendingCameraUri by remember(part.id) { mutableStateOf<Uri?>(null) }
+    var pendingCameraUriString by rememberSaveable(part.id) { mutableStateOf<String?>(null) }
     var permissionNotice by remember(part.id) { mutableStateOf<String?>(null) }
     var showPhotoPreviewDialog by remember(part.id) { mutableStateOf(false) }
 
@@ -159,7 +161,11 @@ fun PartInspectionScreen(
         mutableStateMapOf<String, String>().apply {
             for (symbol in activeElements) {
                 val existing = part.elements[symbol]
-                this[symbol] = if (existing != null) formatElementValue(existing) else ""
+                this[symbol] = when {
+                    existing != null -> formatElementValue(existing)
+                    symbol in part.ndElements -> "ND"
+                    else -> ""
+                }
             }
         }
     }
@@ -168,9 +174,21 @@ fun PartInspectionScreen(
         onResetOcr()
     }
 
+    // Keep photo path synchronized with Room updates even across immediate back navigation
+    LaunchedEffect(part.photoPath) {
+        if (part.photoPath.isNotBlank() && savedPhotoPath.isBlank()) {
+            savedPhotoPath = part.photoPath
+        }
+    }
+
     // Apply offline OCR results & persisted photo path
     LaunchedEffect(ocrState, part.id) {
         when (ocrState) {
+            is OcrUiState.Analyzing -> {
+                if (ocrState.savedPhotoPath.isNotBlank()) {
+                    savedPhotoPath = ocrState.savedPhotoPath
+                }
+            }
             is OcrUiState.Recognized -> {
                 val res = ocrState.result
                 if (ocrState.savedPhotoPath.isNotBlank()) {
@@ -182,10 +200,14 @@ fun PartInspectionScreen(
                     detectedGrade = res.detectedGrade
                 }
                 ocrSummary = res.rawOcrSummary
-                if (res.elements.isNotEmpty()) {
+                if (res.elements.isNotEmpty() || res.ndElements.isNotEmpty()) {
                     for (symbol in activeElements) {
                         val v = res.elements[symbol]
-                        elementTextMap[symbol] = if (v != null) formatElementValue(v) else ""
+                        elementTextMap[symbol] = when {
+                            v != null -> formatElementValue(v)
+                            symbol in res.ndElements -> "ND"
+                            else -> ""
+                        }
                     }
                 }
             }
@@ -201,7 +223,8 @@ fun PartInspectionScreen(
     val takePictureLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicture()
     ) { success ->
-        val uri = pendingCameraUri
+        val uri = pendingCameraUriString?.let { Uri.parse(it) }
+        pendingCameraUriString = null
         if (success && uri != null) {
             capturedImageUri = uri
             permissionNotice = null
@@ -214,7 +237,7 @@ fun PartInspectionScreen(
     ) { granted ->
         if (granted) {
             val uri = createTempPhotoUri(context)
-            pendingCameraUri = uri
+            pendingCameraUriString = uri.toString()
             takePictureLauncher.launch(uri)
         } else {
             permissionNotice = "未授予相机权限，您仍可通过“相册选图”导入光谱仪照片或手动录入。"
@@ -255,15 +278,23 @@ fun PartInspectionScreen(
 
     fun buildUpdatedPart(targetStatus: PartStatus): ComponentInspection {
         val parsedElements = part.elements.toMutableMap()
+        val parsedNdElements = part.ndElements.toMutableSet()
         if (targetStatus == PartStatus.NON_METAL || materialType == "非金属") {
             parsedElements.clear()
+            parsedNdElements.clear()
         } else {
             for (symbol in activeElements) {
-                val num = elementTextMap[symbol]?.trim()?.toDoubleOrNull()
+                val raw = elementTextMap[symbol]?.trim().orEmpty()
+                val num = raw.toDoubleOrNull()
                 if (num != null && num >= 0.0) {
                     parsedElements[symbol] = num.coerceIn(0.0, 100.0)
+                    parsedNdElements.remove(symbol)
+                } else if (SpectrometerTextParser.isNdOrNoneToken(raw)) {
+                    parsedElements.remove(symbol)
+                    parsedNdElements.add(symbol)
                 } else {
                     parsedElements.remove(symbol)
+                    parsedNdElements.remove(symbol)
                 }
             }
         }
@@ -272,6 +303,7 @@ fun PartInspectionScreen(
             materialType = if (targetStatus == PartStatus.NON_METAL) "非金属" else materialType,
             detectedGrade = detectedGrade.trim(),
             elements = parsedElements,
+            ndElements = parsedNdElements,
             cuZnImpurity = cuZnDisplay,
             severityS = severityS,
             motionState = motionState,
@@ -286,7 +318,7 @@ fun PartInspectionScreen(
             activityDescription = activityDescription,
             ocrSummary = ocrSummary,
             inspectorNotes = inspectorNotes,
-            photoPath = savedPhotoPath,
+            photoPath = savedPhotoPath.ifBlank { part.photoPath },
             customFields = customFieldValues.toMap()
         )
     }
@@ -465,7 +497,7 @@ fun PartInspectionScreen(
                                 ) == PackageManager.PERMISSION_GRANTED
                                 if (granted) {
                                     val uri = createTempPhotoUri(context)
-                                    pendingCameraUri = uri
+                                    pendingCameraUriString = uri.toString()
                                     takePictureLauncher.launch(uri)
                                 } else {
                                     cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
@@ -555,8 +587,13 @@ fun PartInspectionScreen(
                                         }
                                     }
                                     is OcrUiState.Recognized -> {
+                                        val ndSuffix = if (ocrState.result.ndElements.isNotEmpty()) {
+                                            " + ${ocrState.result.ndElements.size} 项 ND"
+                                        } else {
+                                            ""
+                                        }
                                         Text(
-                                            text = "识别完成 · ${ocrState.result.elements.size} 项元素（照片已留存）",
+                                            text = "识别完成 · ${ocrState.result.elements.size} 项数值$ndSuffix（照片已留存）",
                                             style = MaterialTheme.typography.labelLarge,
                                             color = MaterialTheme.colorScheme.secondary
                                         )
@@ -728,7 +765,7 @@ fun PartInspectionScreen(
                                     style = MaterialTheme.typography.titleMedium
                                 )
                                 Text(
-                                    text = "当前模板启用 ${activeElements.size} 项元素列（未检出可留空）",
+                                    text = "当前模板启用 ${activeElements.size} 项元素列（未检出可填 ND / 无 或留空）",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -752,26 +789,31 @@ fun PartInspectionScreen(
                                 rowSymbols.forEach { symbol ->
                                     val textVal = elementTextMap[symbol].orEmpty()
                                     val hasPositive = (textVal.toDoubleOrNull() ?: 0.0) > 0.0
+                                    val isNd = SpectrometerTextParser.isNdOrNoneToken(textVal)
                                     OutlinedTextField(
                                         value = textVal,
                                         onValueChange = { raw ->
-                                            val filtered = raw.filter { it.isDigit() || it == '.' }
-                                            elementTextMap[symbol] = filtered
-                                            if (filtered.isNotBlank() && status == PartStatus.PENDING) {
+                                            val trimmed = raw.replace("\n", "").take(10)
+                                            elementTextMap[symbol] = trimmed
+                                            if (trimmed.isNotBlank() && status == PartStatus.PENDING) {
                                                 status = PartStatus.VERIFIED
                                             }
                                         },
                                         label = {
                                             Text(
                                                 text = symbol,
-                                                fontWeight = if (hasPositive) FontWeight.Bold else FontWeight.Normal,
-                                                color = if (hasPositive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                                fontWeight = if (hasPositive || isNd) FontWeight.Bold else FontWeight.Normal,
+                                                color = when {
+                                                    hasPositive -> MaterialTheme.colorScheme.primary
+                                                    isNd -> MaterialTheme.colorScheme.secondary
+                                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                                }
                                             )
                                         },
-                                        placeholder = { Text("-") },
+                                        placeholder = { Text("ND/-") },
                                         singleLine = true,
                                         textStyle = MaterialTheme.typography.labelMedium,
-                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
                                         modifier = Modifier
                                             .weight(1f)
                                             .testTag("element_input_$symbol")

@@ -32,7 +32,8 @@ data class SpectrometerOcrResult(
     val detectedGrade: String,
     val elements: Map<String, Double>,
     val rawOcrSummary: String,
-    val detectedLightElementPct: Double? = null
+    val detectedLightElementPct: Double? = null,
+    val ndElements: Set<String> = emptySet()
 )
 
 data class OcrSpatialLine(
@@ -147,6 +148,7 @@ object SpectrometerTextParser {
 
         val canonicalByUpper = targetElements.associateBy { it.uppercase(Locale.US) }
         val elements = linkedMapOf<String, Double>()
+        val ndElements = linkedSetOf<String>()
         var lightElementPct: Double? = null
 
         val elAnchors = mutableListOf<Pair<String, OcrSpatialLine>>()
@@ -315,11 +317,16 @@ object SpectrometerTextParser {
 
                     usedPctTokens.add(best.item.line)
                     val tok = best.item
-                    if (!tok.isNd && !tok.isErrorRangeToken && tok.value != null && tok.value in 0.0..100.0) {
+                    if (tok.isNd) {
+                        if (sym != "LE" && !elements.containsKey(sym)) {
+                            ndElements.add(sym)
+                        }
+                    } else if (tok.value != null && tok.value in 0.0..100.0) {
                         if (sym == "LE") {
                             if (lightElementPct == null) lightElementPct = tok.value
                         } else {
                             elements[sym] = tok.value
+                            ndElements.remove(sym)
                         }
                     }
                 }
@@ -346,11 +353,16 @@ object SpectrometerTextParser {
                 ).firstOrNull() ?: continue
 
                 usedValueLines.add(best.line)
-                if (!best.isNd && !best.isErrorRangeToken && best.value != null && best.value in 0.0..100.0) {
+                if (best.isNd && !best.isErrorRangeToken) {
+                    if (sym != "LE" && !elements.containsKey(sym)) {
+                        ndElements.add(sym)
+                    }
+                } else if (!best.isNd && !best.isErrorRangeToken && best.value != null && best.value in 0.0..100.0) {
                     if (sym == "LE") {
                         if (lightElementPct == null) lightElementPct = best.value
                     } else {
                         elements[sym] = best.value
+                        ndElements.remove(sym)
                     }
                 }
             }
@@ -383,6 +395,12 @@ object SpectrometerTextParser {
         for ((k, v) in textParsed.elements) {
             if (!elements.containsKey(k)) {
                 elements[k] = v
+                ndElements.remove(k)
+            }
+        }
+        for (ndSym in textParsed.ndElements) {
+            if (!elements.containsKey(ndSym)) {
+                ndElements.add(ndSym)
             }
         }
         if (lightElementPct == null) {
@@ -391,15 +409,17 @@ object SpectrometerTextParser {
 
         val allText = reconstructSpatialRows(normalizedLines).joinToString("\n")
         val detectedGrade = extractBestGrade(normalizedLines.map { it.text }, allText)
-        val isNonMetal = nonMetalKeywords.any { allText.contains(it, ignoreCase = true) } && elements.isEmpty()
+        val isNonMetal = nonMetalKeywords.any { allText.contains(it, ignoreCase = true) } &&
+            elements.isEmpty() && ndElements.isEmpty()
         val materialType = if (isNonMetal) "非金属" else "金属"
 
         return SpectrometerOcrResult(
             materialType = materialType,
             detectedGrade = detectedGrade,
             elements = elements,
-            rawOcrSummary = buildSummary(elements, detectedGrade, isNonMetal, lightElementPct),
-            detectedLightElementPct = lightElementPct
+            rawOcrSummary = buildSummary(elements, ndElements, detectedGrade, isNonMetal, lightElementPct),
+            detectedLightElementPct = lightElementPct,
+            ndElements = ndElements
         )
     }
 
@@ -484,19 +504,21 @@ object SpectrometerTextParser {
             .joinToString("|") { Regex.escape(it) }
 
         val elements = linkedMapOf<String, Double>()
+        val ndElements = linkedSetOf<String>()
         var lightElementPct: Double? = null
 
         if (symbolAlternation.isNotBlank()) {
             // Recover inline OCR element symbol typos (e.g. "Nl 0.132", "T1 ND") before regex matching
             val aliasCorrectedText = cleanText
-                .replace(Regex("""(?<![A-Za-z0-9])(Nl|N1|MI)(?=\s*[:=]?\s*(?:\d|ND|<LOD))""", RegexOption.IGNORE_CASE), "Ni")
-                .replace(Regex("""(?<![A-Za-z0-9])(T1|TL)(?=\s*[:=]?\s*(?:\d|ND|<LOD))""", RegexOption.IGNORE_CASE), "Ti")
-                .replace(Regex("""(?<![A-Za-z0-9])(FC|F0)(?=\s*[:=]?\s*(?:\d|ND|<LOD))""", RegexOption.IGNORE_CASE), "Fe")
+                .replace(Regex("""(?<![A-Za-z0-9])(Nl|N1|MI)(?=\s*[:=]?\s*(?:\d|ND|N\.?D|<LOD|无|未检出|N/?A|NONE|NIL|--))""", RegexOption.IGNORE_CASE), "Ni")
+                .replace(Regex("""(?<![A-Za-z0-9])(T1|TL)(?=\s*[:=]?\s*(?:\d|ND|N\.?D|<LOD|无|未检出|N/?A|NONE|NIL|--))""", RegexOption.IGNORE_CASE), "Ti")
+                .replace(Regex("""(?<![A-Za-z0-9])(FC|F0)(?=\s*[:=]?\s*(?:\d|ND|N\.?D|<LOD|无|未检出|N/?A|NONE|NIL|--))""", RegexOption.IGNORE_CASE), "Fe")
 
-            // Pattern A: same-line symbol + value, e.g. "Fe 0.198 0.083", "Cr: 18.2%", "Cu 180ppm", "Ti ND <0.14"
+            // Pattern A: same-line symbol + value or ND/无 abbreviation
             // Captures ONLY the FIRST token after symbol so +/- 3sigma column isn't mixed in!
+            val ndAlternation = """<LOD|LOD|<DL|DL|BDL|BLD|<RL|<LOQ|<\s*\d+(?:\.\d+)?\s*%?|N\.?\s*D\.?|N/D|N0|NO|N/?A|N\.A\.?|NONE|NIL|NULL|未检出|未检测|未测出|无检出|无显示|未见|空白|无|-{2,}|——|(?<=\s)-(?=\s|$)"""
             val inlineRegex = Regex(
-                """(?<![A-Za-z0-9])($symbolAlternation)\s*[:=]?\s*(?:(<LOD|ND|N\.D\.|--+)|(\d+(?:\.\d+)?)\s*(%|ppm)?)""",
+                """(?<![A-Za-z0-9])($symbolAlternation)\s*[:=]?\s*(?:($ndAlternation)(?![A-Za-z0-9.])|(\d+(?:\.\d+)?)\s*(%|ppm)?)""",
                 RegexOption.IGNORE_CASE
             )
             inlineRegex.findAll(aliasCorrectedText).forEach { match ->
@@ -505,7 +527,15 @@ object SpectrometerTextParser {
                 val numStr = match.groupValues[3]
                 val unit = match.groupValues[4].lowercase(Locale.US)
 
-                if (lodToken.isNotBlank()) return@forEach
+                if (lodToken.isNotBlank()) {
+                    if (rawSym != "LE") {
+                        val canonical = canonicalByUpper[rawSym] ?: return@forEach
+                        if (!elements.containsKey(canonical)) {
+                            ndElements.add(canonical)
+                        }
+                    }
+                    return@forEach
+                }
                 val parsed = numStr.toDoubleOrNull() ?: return@forEach
                 val pct = if (unit == "ppm") parsed / 10_000.0 else parsed
                 if (pct in 0.0..100.0) {
@@ -515,6 +545,7 @@ object SpectrometerTextParser {
                         val canonical = canonicalByUpper[rawSym] ?: return@forEach
                         if (!elements.containsKey(canonical)) {
                             elements[canonical] = pct
+                            ndElements.remove(canonical)
                         }
                     }
                 }
@@ -526,11 +557,16 @@ object SpectrometerTextParser {
                 for (i in 0 until lines.lastIndex) {
                     val sym = resolveStandaloneElementOrLe(lines[i], canonicalByUpper) ?: continue
                     val valPair = parseStandaloneValueToken(lines[i + 1]) ?: continue
-                    if (!valPair.second && valPair.first != null && valPair.first!! in 0.0..100.0) {
+                    if (valPair.second) {
+                        if (sym != "LE" && !elements.containsKey(sym)) {
+                            ndElements.add(sym)
+                        }
+                    } else if (valPair.first != null && valPair.first!! in 0.0..100.0) {
                         if (sym == "LE") {
                             if (lightElementPct == null) lightElementPct = valPair.first
                         } else if (!elements.containsKey(sym)) {
                             elements[sym] = valPair.first!!
+                            ndElements.remove(sym)
                         }
                     }
                 }
@@ -538,15 +574,17 @@ object SpectrometerTextParser {
         }
 
         val detectedGrade = extractBestGrade(cleanText.lines(), cleanText)
-        val isNonMetal = nonMetalKeywords.any { cleanText.contains(it, ignoreCase = true) } && elements.isEmpty()
+        val isNonMetal = nonMetalKeywords.any { cleanText.contains(it, ignoreCase = true) } &&
+            elements.isEmpty() && ndElements.isEmpty()
         val materialType = if (isNonMetal) "非金属" else "金属"
 
         return SpectrometerOcrResult(
             materialType = materialType,
             detectedGrade = detectedGrade,
             elements = elements,
-            rawOcrSummary = buildSummary(elements, detectedGrade, isNonMetal, lightElementPct),
-            detectedLightElementPct = lightElementPct
+            rawOcrSummary = buildSummary(elements, ndElements, detectedGrade, isNonMetal, lightElementPct),
+            detectedLightElementPct = lightElementPct,
+            ndElements = ndElements
         )
     }
 
@@ -577,13 +615,22 @@ object SpectrometerTextParser {
         return null
     }
 
+    fun isNdOrNoneToken(token: String): Boolean {
+        val t = token.trim()
+        if (t.isEmpty()) return false
+        val upper = t.uppercase(Locale.US)
+        return upper in setOf(
+            "ND", "N.D.", "N.D", "N D", "N/D", "N0", "NO",
+            "<LOD", "LOD", "<DL", "DL", "BDL", "BLD", "<RL", "<LOQ",
+            "N/A", "NA", "N.A.", "N.A", "NONE", "NIL", "NULL",
+            "-", "--", "---", "——", "/",
+            "无", "未检出", "未检测", "未测出", "无检出", "无显示", "未见", "空白", "零"
+        ) || t.startsWith("<")
+    }
+
     private fun parseStandaloneValueToken(token: String): Pair<Double?, Boolean>? {
         val t = token.trim()
-        if (t.equals("ND", ignoreCase = true) ||
-            t.equals("N.D.", ignoreCase = true) ||
-            t.equals("<LOD", ignoreCase = true) ||
-            t.startsWith("<")
-        ) {
+        if (isNdOrNoneToken(t)) {
             return null to true
         }
         val match = Regex("""^(\d+(?:\.\d+)?)\s*(%|ppm)?$""", RegexOption.IGNORE_CASE).matchEntire(t)
@@ -617,6 +664,7 @@ object SpectrometerTextParser {
 
     private fun buildSummary(
         elements: Map<String, Double>,
+        ndElements: Set<String>,
         grade: String,
         isNonMetal: Boolean,
         lightElementPct: Double?
@@ -629,8 +677,11 @@ object SpectrometerTextParser {
                     "$k=${String.format(Locale.US, "%.3f", v).trimEnd('0').trimEnd('.')}%"
                 }
                 add("离线 OCR 识别到 ${elements.size} 项元素（$top）")
-            } else {
+            } else if (ndElements.isEmpty()) {
                 add("离线 OCR 未匹配到标准元素百分比")
+            }
+            if (ndElements.isNotEmpty()) {
+                add("未检出(ND)：${ndElements.joinToString("、")}")
             }
             if (lightElementPct != null) {
                 val leStr = String.format(Locale.US, "%.2f", lightElementPct).trimEnd('0').trimEnd('.')
@@ -800,8 +851,10 @@ class SpectrometerOcrRepository {
 
             val hasTableCues = visionText.text.contains("LE", ignoreCase = true) ||
                 visionText.text.contains("ND", ignoreCase = true) ||
+                visionText.text.contains("无") ||
                 visionText.text.contains("%")
             val score = parsed.elements.size * 10 +
+                parsed.ndElements.size * 5 +
                 (if (parsed.detectedGrade.isNotBlank()) 4 else 0) +
                 (if (parsed.detectedLightElementPct != null) 4 else 0) +
                 (if (hasTableCues) 3 else 0) +

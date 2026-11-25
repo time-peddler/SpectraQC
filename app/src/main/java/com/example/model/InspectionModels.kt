@@ -356,6 +356,7 @@ data class ComponentInspection(
     val materialType: String = "金属",
     val detectedGrade: String = "",
     val elements: Map<String, Double> = emptyMap(),
+    val ndElements: Set<String> = emptySet(),
     val cuZnImpurity: String = "",
     val severityS: String = "",
     val motionState: String = "",

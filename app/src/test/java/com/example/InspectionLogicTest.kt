@@ -70,6 +70,7 @@ class InspectionLogicTest {
         assertEquals(8.92, parsed.elements["Ni"]!!, 0.001)
         assertEquals(0.018, parsed.elements["Cu"]!!, 0.0001)
         assertFalse(parsed.elements.containsKey("Zn"))
+        assertTrue(parsed.ndElements.contains("Zn"))
     }
 
     @Test
@@ -124,6 +125,7 @@ class InspectionLogicTest {
         assertEquals(0.11, parsed.elements["Cr"]!!, 0.0001)
         assertEquals(0.11, parsed.elements["Ni"]!!, 0.0001)
         assertFalse(parsed.elements.containsKey("Ti"))
+        assertTrue(parsed.ndElements.contains("Ti"))
         assertFalse(parsed.elements.containsKey("Mn"))
     }
 
@@ -170,6 +172,58 @@ class InspectionLogicTest {
         assertEquals(0.132, parsed.elements["Ni"]!!, 0.0001)
         assertEquals(0.125, parsed.elements["Cr"]!!, 0.0001)
         assertFalse(parsed.elements.containsKey("Ti"))
+        assertTrue(parsed.ndElements.contains("Ti"))
+    }
+
+    @Test
+    fun ndAndNoneAbbreviationsSupportedInOcrAndInlineText() {
+        assertTrue(SpectrometerTextParser.isNdOrNoneToken("ND"))
+        assertTrue(SpectrometerTextParser.isNdOrNoneToken("N.D."))
+        assertTrue(SpectrometerTextParser.isNdOrNoneToken("N/D"))
+        assertTrue(SpectrometerTextParser.isNdOrNoneToken("N0"))
+        assertTrue(SpectrometerTextParser.isNdOrNoneToken("<LOD"))
+        assertTrue(SpectrometerTextParser.isNdOrNoneToken("无"))
+        assertTrue(SpectrometerTextParser.isNdOrNoneToken("未检出"))
+        assertTrue(SpectrometerTextParser.isNdOrNoneToken("N/A"))
+        assertTrue(SpectrometerTextParser.isNdOrNoneToken("NA"))
+        assertTrue(SpectrometerTextParser.isNdOrNoneToken("NONE"))
+        assertTrue(SpectrometerTextParser.isNdOrNoneToken("NIL"))
+        assertTrue(SpectrometerTextParser.isNdOrNoneToken("--"))
+        assertFalse(SpectrometerTextParser.isNdOrNoneToken("Ni-Cr"))
+        assertFalse(SpectrometerTextParser.isNdOrNoneToken("35CrMo"))
+        assertFalse(SpectrometerTextParser.isNdOrNoneToken("0.11"))
+
+        val lines = listOf(
+            OcrSpatialLine("Nov 20-188", left = 40, top = 10, right = 180, bottom = 35),
+            OcrSpatialLine("35CrMo", left = 40, top = 40, right = 140, bottom = 65),
+            OcrSpatialLine("El", left = 40, top = 80, right = 75, bottom = 105),
+            OcrSpatialLine("%", left = 150, top = 80, right = 185, bottom = 105),
+            OcrSpatialLine("+/- 3σ", left = 260, top = 80, right = 340, bottom = 105),
+            OcrSpatialLine("Fe", left = 40, top = 120, right = 75, bottom = 148),
+            OcrSpatialLine("97.20", left = 148, top = 120, right = 215, bottom = 148),
+            OcrSpatialLine("Cr", left = 40, top = 160, right = 75, bottom = 188),
+            OcrSpatialLine("1.05", left = 148, top = 160, right = 205, bottom = 188),
+            OcrSpatialLine("Ti", left = 40, top = 200, right = 75, bottom = 228),
+            OcrSpatialLine("ND", left = 148, top = 200, right = 195, bottom = 228),
+            OcrSpatialLine("<0.10", left = 265, top = 200, right = 335, bottom = 228),
+            OcrSpatialLine("Mn", left = 40, top = 240, right = 75, bottom = 268),
+            OcrSpatialLine("无", left = 148, top = 240, right = 185, bottom = 268),
+            OcrSpatialLine("Cu", left = 40, top = 280, right = 75, bottom = 308),
+            OcrSpatialLine("未检出", left = 148, top = 280, right = 220, bottom = 308),
+            OcrSpatialLine("V", left = 40, top = 320, right = 75, bottom = 348),
+            OcrSpatialLine("N/A", left = 148, top = 320, right = 198, bottom = 348),
+            OcrSpatialLine("Nb", left = 40, top = 360, right = 75, bottom = 388),
+            OcrSpatialLine("--", left = 148, top = 360, right = 185, bottom = 388),
+            OcrSpatialLine("Mo 0.22  W N.D.  Co NONE", left = 40, top = 405, right = 380, bottom = 433)
+        )
+        val parsed = SpectrometerTextParser.parseFromSpatialLines(lines, ELEMENT_SYMBOLS)
+        assertEquals(97.20, parsed.elements["Fe"]!!, 0.001)
+        assertEquals(1.05, parsed.elements["Cr"]!!, 0.001)
+        assertEquals(0.22, parsed.elements["Mo"]!!, 0.001)
+        assertTrue(parsed.ndElements.containsAll(setOf("Ti", "Mn", "Cu", "V", "Nb", "W", "Co")))
+        assertFalse(parsed.ndElements.contains("Ni"))
+        assertFalse(parsed.elements.containsKey("Ti"))
+        assertFalse(parsed.elements.containsKey("Mn"))
     }
 
     @Test
@@ -228,7 +282,8 @@ class InspectionLogicTest {
                 detectedGrade = "SS304",
                 activityDescription = "阀门启闭传动轴",
                 photoPath = tempPhoto.absolutePath,
-                elements = mapOf("Fe" to 70.4, "Cr" to 18.2, "Ni" to 8.9, "C" to 0.06)
+                elements = mapOf("Fe" to 70.4, "Cr" to 18.2, "Ni" to 8.9, "C" to 0.06),
+                ndElements = setOf("Ti", "Mn")
             )
 
             val xlsxBytes = ReportExporter.buildTemplateXlsxBytes(meta, listOf(eq to listOf(part)), customConfig)
@@ -272,6 +327,7 @@ class InspectionLogicTest {
             assertTrue(sheet1.contains("<t>C</t>"))
             assertFalse("Disabled Zr element should be omitted", sheet1.contains("<t>Zr</t>"))
             assertTrue(sheet1.contains("<v>0.06</v>"))
+            assertTrue(sheet1.contains("<t>ND</t>"))
             assertTrue(sheet1.contains("ht=\"72\" customHeight=\"1\""))
             assertTrue(sheet1.contains("<drawing r:id=\"rId1\"/>"))
 
