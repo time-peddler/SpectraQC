@@ -4,6 +4,18 @@
 
 SpectraQC 面向工业设备、阀门及车间设施的现场材质检测记录，帮助质量人员将光谱仪读数、设备信息、检测部位及现场照片整理为结构化记录，并导出 Excel 报告。
 
+## 界面预览 / Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/equipment-list.jpg" alt="设备台账与检测进度" width="300" />
+  &nbsp;&nbsp;
+  <img src="docs/screenshots/ocr-inspection.jpg" alt="离线光谱 OCR 与材质检测" width="300" />
+</p>
+
+<p align="center">设备台账与检测进度 · 离线光谱 OCR 与材质检测</p>
+
+*截图中的内部编号、原始照片及部分检测数据已脱敏。*
+
 ## 功能特性
 
 - 设备台账与检测部位管理，支持设备复制、自定义部位及检测状态。
