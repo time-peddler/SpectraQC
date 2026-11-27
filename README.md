@@ -88,4 +88,10 @@ app/src/test/     # 业务逻辑、OCR 与报告测试
 
 首个正式版本：**v1.0.0**。欢迎通过 [Issues](https://github.com/time-peddler/SpectraQC/issues) 提交问题及功能建议。请勿上传含客户信息、内部检测记录或凭据的附件。
 
-仓库目前未声明开源许可证；公开可见不代表已授权再分发或商业使用。
+## 开源许可证 / License
+
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
+
+SpectraQC 自有源代码采用 **GNU Affero General Public License v3.0（AGPL-3.0-only）**，详见 [LICENSE](LICENSE)。允许在遵守许可证条件的前提下使用、修改和再分发；如通过网络向用户提供修改后的程序，应按 AGPL 第 13 条提供对应源代码。
+
+第三方组件、字体和素材不因本项目许可证而改变其原有授权。详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。Google ML Kit SDK 受其独立条款约束；包含该 SDK 的 APK 再分发前，需要进一步确认与 AGPL 的兼容性。
