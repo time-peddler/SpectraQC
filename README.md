@@ -86,7 +86,7 @@ app/src/test/     # 业务逻辑、OCR 与报告测试
 
 ## 版本与反馈
 
-首个正式版本：**v1.0.0**。欢迎通过 [Issues](https://github.com/time-peddler/SpectraQC/issues) 提交问题及功能建议。请勿上传含客户信息、内部检测记录或凭据的附件。
+当前版本：**v1.0.1**。欢迎通过 [Issues](https://github.com/time-peddler/SpectraQC/issues) 提交问题及功能建议。请勿上传含客户信息、内部检测记录或凭据的附件。
 
 ## 开源许可证 / License
 
