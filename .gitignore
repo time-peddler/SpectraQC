@@ -17,3 +17,24 @@ local.properties
 .env
 debug.keystore
 *-debug.log
+
+# Secrets, signing and machine-specific configuration
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+*.apk
+*.aab
+**/google-services.json
+**/secrets.properties
+**/keystore.properties
+**/signing.properties
+# Local screenshots and inspection material (review before publishing)
+/assets/
